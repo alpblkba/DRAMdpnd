@@ -1,0 +1,7 @@
+cff-version: 1.2.0
+message: "If you use this teaching and research artifact, cite DRAMdpnd and the upstream research implementations you actually use."
+title: "DRAMdpnd: DRAM dependability platform"
+type: software
+authors:
+  - given-names: "Alp"
+    family-names: "Bolukbasi"

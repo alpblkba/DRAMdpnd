@@ -1,0 +1,9 @@
+{
+  "traceEvents": [
+    {"name": "Request accepted", "cat": "synthetic", "ph": "X", "ts": 0, "dur": 5, "pid": 1, "tid": 1},
+    {"name": "Controller service", "cat": "synthetic", "ph": "X", "ts": 5, "dur": 18, "pid": 1, "tid": 1},
+    {"name": "Request completed", "cat": "synthetic", "ph": "I", "s": "t", "ts": 23, "pid": 1, "tid": 1},
+    {"name": "Queue depth", "cat": "synthetic", "ph": "C", "ts": 0, "pid": 1, "tid": 2, "args": {"depth": 1}},
+    {"name": "Queue depth", "cat": "synthetic", "ph": "C", "ts": 5, "pid": 1, "tid": 2, "args": {"depth": 0}}
+  ]
+}

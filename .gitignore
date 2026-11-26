@@ -1,0 +1,109 @@
+# Public files only
+*
+
+# Project metadata
+!/.gitignore
+!/README.md
+!/LICENSE
+!/CITATION.cff
+!/THIRD_PARTY.md
+!/requirements-figures.txt
+
+# Application
+!/bin/
+!/bin/dramdpnd
+
+!/scripts/
+!/scripts/*.py
+!/scripts/*.sh
+!/scripts/*.cjs
+!/scripts/workbench-template.html
+
+# Tests
+!/tests/
+!/tests/test_*.py
+
+# Experiment configurations and learning inputs
+!/experiments/
+!/experiments/*.yaml
+!/experiments/ramulator.py
+!/experiments/ordinary.trace
+!/experiments/idle.trace
+!/experiments/perfetto-example.json
+
+# Demonstration sources
+!/demos/
+!/demos/*.tape
+
+# Documentation
+!/docs/
+!/docs/environment.md
+!/docs/runs.md
+!/docs/exploration.md
+!/docs/measurements.md
+!/docs/visualization.md
+!/docs/workbench.md
+!/docs/figures.md
+!/docs/development.md
+
+# Documentation assets
+!/docs/assets/
+!/docs/assets/execution.gif
+!/docs/assets/analysis.gif
+!/docs/assets/workbench.gif
+!/docs/assets/ramviz.gif
+!/docs/assets/workbench.png
+
+# External implementations and generated evidence
+/external/
+/runs/
+/.venv/
+
+# Private development material
+/claude/
+/codex/
+/private/
+/Self-Docs/
+/STYLE.md
+/project-charter-v1.md
+/claude-coarchitect-report-2026-11-24.md
+/claude-coarchitect-report-*.md
+/prac_side_effects.png
+/docs/development-report-*.md
+/docs/publication-review.md
+
+# Agent artifacts
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+MOP.md
+.claude/
+.codex/
+.agents/
+.cursor/
+.kiro/
+
+# Build outputs and dependencies
+build/
+dist/
+target/
+node_modules/
+.venv/
+__pycache__/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local artifacts
+*.pyc
+*.log
+*.jsonl
+*.ram2bin
+*.zip
+*.patch
+*.tmp
+*.swp
+.env
+.env.*
+.DS_Store

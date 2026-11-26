@@ -1,0 +1,53 @@
+Frontend:
+  impl: BHO3
+  clock_ratio: 5
+  num_expected_insts: 512
+  llc_capacity_per_core: 1KB
+  traces:
+    - ordinary.trace
+  Translation:
+    impl: NoTranslation
+    max_addr: 68719476736
+
+MemorySystem:
+  impl: BHDRAMSystem
+  clock_ratio: 4
+  DRAM:
+    impl: DDR5-PRAC
+    org:
+      preset: DDR5_32Gb_x8
+      channel: 1
+      rank: 2
+    timing:
+      preset: DDR5_6400B
+    RFM:
+      BRC: 2
+    PRAC: true
+    drampower_enable: true
+    voltage:
+      preset: Default
+    current:
+      preset: Default
+  BHDRAMController:
+    impl: PRACOPTDRAMController
+    BHScheduler:
+      impl: PRACScheduler
+    RefreshManager:
+      impl: AllBank
+    RowPolicy:
+      impl: ClosedRowPolicy
+      cap: 4
+    plugins:
+      - ControllerPlugin:
+          impl: QPRAC
+          abo_delay_acts: 1
+          abo_recovery_refs: 1
+          abo_threshold: 32
+          psq_size: 5
+          targeted_ref_frequency: 0
+          enable_opportunistic_mitigation: true
+      - ControllerPlugin:
+          impl: TraceRecorder
+          path: commands/trace
+  AddrMapper:
+    impl: MOP4CLXOR

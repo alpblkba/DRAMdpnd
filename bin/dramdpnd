@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Run bounded, original Ramulator2 artifact experiments."""
+
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+import webbrowser
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from evidence import EvidenceError, analyze, discover, load_metadata, native_statistics, run_path, safe_file, sha256, verify
+
+from workspace import IMAGE, SOURCES, call, image_id, readiness, source_revision
+
+def execute(name, relative_output=False):
+    if (ROOT / "runs").is_symlink() or (ROOT / "runs" / name).is_symlink():
+        print(f"{name}: run directory must not be a symbolic link", file=sys.stderr)
+        return 2
+    image = image_id()
+    problem = readiness(name, image)
+    if problem:
+        print(f"{name}: {problem}", file=sys.stderr)
+        return 2
+    spec = SOURCES[name]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run = ROOT / "runs" / name / f"{stamp}-{uuid.uuid4().hex[:6]}"
+    run.mkdir(parents=True)
+    config_name = "config.py" if name == "ramulator" else "config.yaml"
+    shutil.copy2(ROOT / spec["config"], run / config_name)
+    for workload in spec["workloads"]:
+        shutil.copy2(ROOT / "experiments" / workload, run / workload)
+    binary = ROOT / spec["binary"]
+    source = ROOT / spec["checkout"]
+    command = [
+        "docker", "run", "--pull", "never", "--rm", "--network", "none",
+        "--platform", "linux/arm64", "--user", f"{os.getuid()}:{os.getgid()}",
+        "--mount", f"type=bind,src={source},dst=/workspace/{spec['checkout']},readonly",
+        "--mount", f"type=bind,src={run},dst=/workspace/{run.relative_to(ROOT)}",
+        "-w", f"/workspace/{run.relative_to(ROOT)}",
+    ]
+    if name == "ramulator":
+        command += ["-e", "PYTHONPATH=/workspace/external/ramulator2/python", "-e", "LD_LIBRARY_PATH=/workspace/external/ramulator2"]
+    command += [image, "timeout", "60s"]
+    command += ["python3", config_name] if name == "ramulator" else [f"/workspace/{spec['binary']}", "-f", config_name]
+    compiler = call("docker", "run", "--pull", "never", "--rm", "--network", "none", image, "g++", "-dumpfullversion")
+    cmake = call("docker", "run", "--pull", "never", "--rm", "--network", "none", image, "cmake", "--version")
+    dependencies = {}
+    extension_dir = source / ("perf_analysis/ext" if name == "qprac" else "PRACLeak/ramulator2/ext" if name == "wmb" else "ext")
+    for path in sorted(extension_dir.iterdir()) if extension_dir.is_dir() else []:
+        if (path / ".git").exists():
+            revision = call("git", "-C", str(path), "rev-parse", "HEAD")
+            if revision.returncode == 0:
+                dependencies[str(path.relative_to(source))] = revision.stdout.strip()
+    started = datetime.now(timezone.utc)
+    tick = time.monotonic()
+    metadata = {
+        "schema_version": 2,
+        "run_id": run.name,
+        "artifact": name,
+        "source_repository": spec["repo"],
+        "source_revision": spec["revision"],
+        "nested_dependencies": dependencies,
+        "simulator_executable": spec["binary"],
+        "simulator_sha256": sha256(binary),
+        "configuration": {"file": config_name, "sha256": sha256(run / config_name), "source_file": spec["config"], "transformation": "byte-for-byte copy", "resolved_runtime_config": None},
+        "workloads": [{"file": item, "sha256": sha256(run / item)} for item in spec["workloads"]],
+        "command": command,
+        "host": {"system": platform.system(), "architecture": platform.machine()},
+        "environment": {"kind": "Docker Linux ARM64", "image": IMAGE, "image_id": image},
+        "compiler": compiler.stdout.strip() if compiler.returncode == 0 else None,
+        "cmake": cmake.stdout.splitlines()[0] if cmake.returncode == 0 else None,
+        "started_at": started.isoformat(),
+        "execution_status": "INCOMPLETE",
+        "evidence_status": "UNVERIFIED",
+        "exit_status": None,
+    }
+    write_metadata(run, metadata)
+    with (run / "stdout.txt").open("w") as stdout, (run / "stderr.txt").open("w") as stderr:
+        try:
+            result = subprocess.run(command, stdout=stdout, stderr=stderr, check=False)
+        except KeyboardInterrupt:
+            metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
+            metadata["wall_seconds"] = round(time.monotonic() - tick, 3)
+            metadata["execution_status"] = "INTERRUPTED"
+            write_metadata(run, metadata)
+            return 130
+        except OSError as error:
+            metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
+            metadata["wall_seconds"] = round(time.monotonic() - tick, 3)
+            metadata["execution_status"] = "FAILED"
+            metadata["error"] = str(error)
+            write_metadata(run, metadata)
+            print(f"{name}: execution failed; evidence: {run}; {error}", file=sys.stderr)
+            return 1
+    completed = datetime.now(timezone.utc)
+    files = sorted(str(path.relative_to(run)) for path in run.rglob("*") if path.is_file())
+    traces = [path for path in files if path.endswith(".ram2bin") or path.startswith("commands/trace.ch")]
+    outputs = [item for item in files if item not in {config_name, *spec["workloads"], "metadata.json"}]
+    hashes = {item: sha256(run / item) for item in outputs}
+    manifest = "".join(f"{digest}  {path}\n" for path, digest in sorted(hashes.items()))
+    (run / "outputs.sha256.tmp").write_text(manifest)
+    (run / "outputs.sha256.tmp").replace(run / "outputs.sha256")
+    metadata.update({
+        "completed_at": completed.isoformat(),
+        "wall_seconds": round(time.monotonic() - tick, 3),
+        "exit_status": result.returncode,
+        "execution_status": "SUCCESS" if result.returncode == 0 else "FAILED",
+        "native_output_files": outputs,
+        "native_trace_files": traces,
+        "trace_format": "RAM2BIN 1.2" if name == "ramulator" else "native text",
+        "statistics_file": "stats.json" if name == "ramulator" else "stdout.txt",
+        "output_hashes": hashes,
+        "output_manifest_sha256": sha256(run / "outputs.sha256"),
+    })
+    write_metadata(run, metadata)
+    check = verify(run)
+    metadata["evidence_status"] = check["status"]
+    metadata["evidence_issues"] = check["issues"]
+    metadata["harness_status"] = "complete" if check["status"] == "VALID" else "incomplete"
+    metadata["ramviz_compatible"] = name == "ramulator" and check["status"] == "VALID"
+    write_metadata(run, metadata)
+    print(f"{name}: {metadata['execution_status']}, evidence {check['status']}; output: {run.relative_to(ROOT) if relative_output else run}")
+    if result.returncode:
+        detail = (run / "stderr.txt").read_text().strip().splitlines()
+        if detail:
+            print(detail[-1], file=sys.stderr)
+    for issue in check["issues"]:
+        print(issue, file=sys.stderr)
+    return result.returncode or (0 if check["status"] == "VALID" else 1)
+
+
+def write_metadata(run, metadata):
+    temporary = run / "metadata.json.tmp"
+    temporary.write_text(json.dumps(metadata, indent=2) + "\n")
+    temporary.replace(run / "metadata.json")
+
+
+def status():
+    image = image_id()
+    print("artifact  source       build        ready        valid  unverified  invalid  incomplete  trace       RamViz launch Perfetto export")
+    for name, spec in SOURCES.items():
+        source = "available" if source_revision(spec) == spec["revision"] else "unavailable"
+        build = "available" if (ROOT / spec["binary"]).is_file() else "unavailable"
+        ready = "available" if not readiness(name, image) else "unavailable"
+        records = [(run, verify(run)["status"]) for run in discover() if run.parent.name == name]
+        checks = [state for _, state in records]
+        trace = "RAM2BIN" if name == "ramulator" else "text"
+        ramviz = "available" if name == "ramulator" and (ROOT / "external/ramulator2/visualizer/.output/server/index.mjs").is_file() and any(item in ("VALID", "UNVERIFIED") for item in checks) else "unavailable"
+        perfetto = "available" if any(analyze(run)["tCK_ps"] for run, state in records if state == "VALID") else "unverified"
+        print(f"{name:9} {source:12} {build:12} {ready:12} {checks.count('VALID'):5}  {checks.count('UNVERIFIED'):10}  {checks.count('INVALID'):7}  {checks.count('INCOMPLETE'):10}  {trace:10}  {ramviz:12} {perfetto}")
+    print("All four native trace parsers and statistics readers are available at the pinned revisions; viewer interaction is checked separately.")
+
+
+def runs():
+    print("artifact  run ID                       execution    evidence     started UTC")
+    for run in discover():
+        check = verify(run)
+        metadata = check["metadata"] or {}
+        execution = metadata.get("execution_status", "LEGACY" if metadata else "UNKNOWN")
+        if not isinstance(execution, str):
+            execution = "UNKNOWN"
+        if execution == "LEGACY":
+            execution = "SUCCESS" if metadata.get("exit_status") == 0 else "FAILED"
+        started = metadata.get("started_at")
+        print(f"{run.parent.name:9} {run.name:28} {execution:12} {check['status']:12} {started.replace('+00:00', 'Z') if isinstance(started, str) else '-'}")
+
+
+def inspect_run(run):
+    check = verify(run)
+    metadata = check["metadata"] or {}
+    configuration = metadata.get("configuration") if isinstance(metadata.get("configuration"), dict) else {}
+    environment = metadata.get("environment") if isinstance(metadata.get("environment"), dict) else {}
+    print(f"Run: {run.name} ({run.parent.name})")
+    print(f"Execution: {metadata.get('execution_status', 'LEGACY' if metadata else 'UNKNOWN')}; evidence: {check['status']}; schema: {metadata.get('schema_version', 1) if metadata else 'absent'}")
+    print(f"Source: {metadata.get('source_repository', 'unavailable')} @ {metadata.get('source_revision', 'unavailable')}")
+    print(f"Executable: {metadata.get('simulator_executable', 'unavailable')} sha256={metadata.get('simulator_sha256', 'unavailable')}")
+    print(f"Environment: {environment.get('kind', 'unavailable')} image={environment.get('image_id', 'unavailable')}")
+    print(f"Configuration: {configuration.get('file', 'unavailable')}; resolved runtime configuration: {'unavailable' if configuration.get('resolved_runtime_config') is None else 'recorded'}")
+    print(f"Host wall time: {metadata.get('wall_seconds', 'unavailable')} s; process exit: {metadata.get('exit_status', 'unavailable')}")
+    print("Native files:")
+    for relative in metadata.get("native_output_files") if isinstance(metadata.get("native_output_files"), list) else []:
+        try:
+            path = safe_file(run, relative)
+            print(f"  {relative} ({path.stat().st_size} bytes)")
+        except (EvidenceError, TypeError):
+            print(f"  {relative} (missing or unsafe)")
+    try:
+        stats, source = native_statistics(run, run.parent.name)
+        print(f"Native statistics: {len(stats)} keys in {source}")
+    except EvidenceError as error:
+        print(f"Native statistics: unavailable ({error})")
+    for issue in check["issues"]:
+        print(f"Evidence issue: {issue}")
+    return 0
+
+
+def verify_run(run):
+    check = verify(run)
+    print(f"{run.parent.name}/{run.name}: {check['status']}")
+    for issue in check["issues"]:
+        print(f"  {issue}")
+    return 0 if check["status"] == "VALID" else 1
+
+
+def doctor():
+    print(f"Host: {platform.system()} {platform.machine()} ({platform.platform()})")
+    print(f"Python: {platform.python_version()}")
+    print(f"Disk free: {shutil.disk_usage(ROOT).free // (1024 ** 3)} GiB")
+    for tool, arguments in (("git", ["--version"]), ("cmake", ["--version"]), ("c++", ["--version"]), ("node", ["--version"]), ("npm", ["--version"])):
+        path = shutil.which(tool)
+        result = call(path, *arguments) if path else None
+        print(f"{tool}: {result.stdout.splitlines()[0] if result and result.returncode == 0 else 'unavailable'}")
+    image = image_id()
+    print(f"Docker ARM64 image: {image or 'unavailable'} ({IMAGE})")
+    for name, spec in SOURCES.items():
+        print(f"{name}: {readiness(name, image) or 'ready'}")
+
+
+def help_text():
+    print("Usage: dramdpnd {chronus|qprac|wmb|ramulator|status|doctor|runs|ui|help}")
+    print("       dramdpnd {inspect|verify|analyze|perfetto|figures} RUN_ID")
+    print("       dramdpnd analyze RUN_ID --summary; dramdpnd ARTIFACT --relative")
+    print("       dramdpnd ui --no-open")
+    print("       dramdpnd ramulator ramviz")
+    print("Artifact commands run one bounded ordinary workload. Existing runs are never overwritten.")
+    print("Example: dramdpnd runs; dramdpnd inspect 20261125T015002Z-8747a8")
+    print("ramulator ramviz opens an existing validated upstream RAM2BIN recording.")
+
+
+def ramviz():
+    visualizer = ROOT / "external/ramulator2/visualizer/.output/server/index.mjs"
+    if source_revision(SOURCES["ramulator"]) != SOURCES["ramulator"]["revision"]:
+        print("ramulator ramviz: unavailable; upstream source revision does not match the pin", file=sys.stderr)
+        return 2
+    if call("git", "-C", str(ROOT / "external/ramulator2"), "diff", "--quiet", "HEAD", "--").returncode != 0:
+        print("ramulator ramviz: unavailable; tracked upstream files differ from the pin", file=sys.stderr)
+        return 2
+    if not visualizer.is_file():
+        print("ramulator ramviz: unavailable; upstream RamViz build missing", file=sys.stderr)
+        return 2
+    matching = [run for run in discover() if run.parent.name == "ramulator" and verify(run)["status"] in ("VALID", "UNVERIFIED") and load_metadata(run)[0] and load_metadata(run)[0].get("exit_status") == 0]
+    if not matching:
+        print("ramulator ramviz: unavailable; run 'dramdpnd ramulator' to record a native RAM2BIN trace", file=sys.stderr)
+        return 2
+    sys.path.insert(0, str(ROOT / "external/ramulator2/python"))
+    from ramulator.visualizer import VisualizerError, VisualizerServer
+    try:
+        server = VisualizerServer(traces=matching[0])
+        server.start()
+        webbrowser.open(server.link)
+        return server.wait()
+    except (VisualizerError, FileNotFoundError) as error:
+        print(f"ramulator ramviz: {error}", file=sys.stderr)
+        return 2
+
+
+def main(argv):
+    if not argv or argv == ["help"] or argv == ["--help"]:
+        help_text()
+        return 0
+    if argv == ["status"]:
+        status()
+        return 0
+    if argv == ["doctor"]:
+        doctor()
+        return 0
+    if argv == ["runs"]:
+        runs()
+        return 0
+    if argv in (["ui"], ["ui", "--no-open"]):
+        from workbench import generate
+        try:
+            output = generate()
+        except EvidenceError as error:
+            print(f"ui: {error}", file=sys.stderr)
+            return 2
+        print(output.relative_to(ROOT) if len(argv) == 2 else output)
+        if len(argv) == 1:
+            webbrowser.open(output.as_uri())
+        return 0
+    if (len(argv) == 2 or (len(argv) == 3 and argv[0] == "analyze" and argv[2] == "--summary")) and argv[0] in {"inspect", "verify", "analyze", "perfetto", "figures"}:
+        try:
+            run = run_path(argv[1])
+            if argv[0] == "inspect":
+                return inspect_run(run)
+            if argv[0] == "verify":
+                return verify_run(run)
+            if argv[0] == "perfetto":
+                from perfetto_export import export
+                print(export(run))
+                return 0
+            if argv[0] == "figures":
+                python = ROOT / ".venv/bin/python"
+                if not python.is_file():
+                    raise EvidenceError("project-local Matplotlib environment missing; see docs/figures.md")
+                return subprocess.run([str(python), str(ROOT / "scripts/figures.py"), run.name], check=False).returncode
+            result = analyze(run)
+            if len(argv) == 3:
+                print(f"{result['artifact']}/{result['run_id']}: evidence {result['evidence_status']} ({result['trace_format']})")
+                print(f"Recorded commands: {result['event_count']}; ACT: {result['measurements']['recorded_activations']}; observed span: {result['span_cycles']} controller cycles")
+                print(f"Model period: {result['tCK_ps'] if result['tCK_ps'] is not None else 'unavailable'} ps; span: {result['measurements']['observed_span_ns'] if result['measurements']['observed_span_ns'] is not None else 'unavailable'} ns")
+                print("Native commands: " + ", ".join(f"{key}={value}" for key, value in result["command_counts"].items()))
+                print(f"Native statistics: {len(result['native_statistics'])} entries from {result['statistics_source']}")
+                print("Source evidence: " + (result["sample_events"][0]["source"] if result["sample_events"] else "unavailable"))
+            else:
+                print(json.dumps(result, indent=2))
+            return 0
+        except EvidenceError as error:
+            print(f"{argv[0]}: {error}", file=sys.stderr)
+            return 2
+    if argv == ["ramulator", "ramviz"]:
+        return ramviz()
+    if argv[0] in SOURCES and len(argv) == 2 and argv[1] in {"ramviz", "perfetto"}:
+        detail = "native text command traces are not RAM2BIN; no bridge has been validated" if argv[1] == "ramviz" else "no compatible Perfetto trace workflow has been validated"
+        print(f"{argv[0]} {argv[1]}: unavailable; {detail}", file=sys.stderr)
+        return 2
+    if argv[0] in SOURCES and (len(argv) == 1 or (len(argv) == 2 and argv[1] == "--relative")):
+        return execute(argv[0], len(argv) == 2)
+    help_text()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

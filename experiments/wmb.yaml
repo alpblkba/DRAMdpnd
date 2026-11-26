@@ -1,0 +1,43 @@
+Frontend:
+  impl: BHO3
+  clock_ratio: 8
+  num_expected_insts: 512
+  llc_capacity_per_core: 1KB
+  traces:
+    - ordinary.trace
+    - idle.trace
+  Translation:
+    impl: NoTranslation
+    max_addr: 17179869184
+
+MemorySystem:
+  impl: BHDRAMSystem
+  clock_ratio: 3
+  DRAM:
+    impl: DDR5-VRR
+    org:
+      preset: DDR5_16Gb_x8
+      channel: 1
+      rank: 2
+    timing:
+      preset: DDR5_3200AN
+    RFM:
+      BRC: 2
+    PRAC: true
+  BHDRAMController:
+    impl: PRACDRAMController
+    BHScheduler:
+      impl: PRACScheduler
+    RefreshManager:
+      impl: AllBank
+    RowPolicy:
+      impl: ClosedRowPolicy
+      cap: 1
+    plugins:
+      - ControllerPlugin:
+          impl: PRAC
+      - ControllerPlugin:
+          impl: TraceRecorder
+          path: commands/trace
+  AddrMapper:
+    impl: RoCoRaBaCh
